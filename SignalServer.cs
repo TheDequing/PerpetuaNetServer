@@ -31,6 +31,7 @@ app.Map("/ws", async context =>
                 if (message.Contains("\"type\":\"offer\""))
                 {
                     offers[clientId] = message;
+                    Console.WriteLine($"Oferta armazenada para {clientId}");
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open)
@@ -43,6 +44,7 @@ app.Map("/ws", async context =>
                 else if (message.Contains("\"type\":\"answer\""))
                 {
                     answers[clientId] = message;
+                    Console.WriteLine($"Resposta armazenada para {clientId}");
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open && offers.ContainsKey(client.Key))
@@ -51,6 +53,10 @@ app.Map("/ws", async context =>
                             Console.WriteLine($"Resposta enviada de {clientId} para {client.Key}");
                         }
                     }
+                }
+                else
+                {
+                    Console.WriteLine($"Mensagem ignorada de {clientId}: não é oferta nem resposta");
                 }
             }
         }
