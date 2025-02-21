@@ -6,6 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
 var clients = new ConcurrentDictionary<string, WebSocket>();
+var lastOffer = string.Empty;
 
 app.UseWebSockets();
 app.Map("/ws", async context =>
@@ -24,11 +25,25 @@ app.Map("/ws", async context =>
                 var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
 
-                foreach (var client in clients)
+                if (message.Contains("offer"))
                 {
-                    if (client.Key != clientId && client.Value.State == WebSocketState.Open)
+                    lastOffer = message; // Armazena a última oferta
+                    foreach (var client in clients)
                     {
-                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                        if (client.Key != clientId && client.Value.State == WebSocketState.Open)
+                        {
+                            await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                        }
+                    }
+                }
+                else if (message.Contains("answer") && !string.IsNullOrEmpty(lastOffer))
+                {
+                    foreach (var client in clients)
+                    {
+                        if (client.Key != clientId && client.Value.State == WebSocketState.Open)
+                        {
+                            await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                        }
                     }
                 }
             }
