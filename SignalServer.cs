@@ -7,7 +7,6 @@ var app = builder.Build();
 
 var clients = new ConcurrentDictionary<string, WebSocket>();
 var offers = new ConcurrentDictionary<string, string>();
-var answers = new ConcurrentDictionary<string, string>();
 
 app.UseWebSockets();
 app.Map("/ws", async context =>
@@ -19,6 +18,16 @@ app.Map("/ws", async context =>
         clients.TryAdd(clientId, ws);
         Console.WriteLine($"Cliente conectado: {clientId}");
 
+        // Enviar oferta existente de outro peer, se houver
+        foreach (var offer in offers)
+        {
+            if (offer.Key != clientId && ws.State == WebSocketState.Open)
+            {
+                await ws.SendAsync(Encoding.UTF8.GetBytes(offer.Value), WebSocketMessageType.Text, true, CancellationToken.None);
+                Console.WriteLine($"Oferta existente enviada de {offer.Key} para novo cliente {clientId}");
+            }
+        }
+
         try
         {
             while (ws.State == WebSocketState.Open)
@@ -28,7 +37,6 @@ app.Map("/ws", async context =>
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                 Console.WriteLine($"Mensagem recebida de {clientId}: {message}");
 
-                // Corrigido para reconhecer "type":1 como oferta
                 if (message.Contains("\"type\":1") || message.Contains("\"type\":\"offer\""))
                 {
                     offers[clientId] = message;
@@ -42,11 +50,8 @@ app.Map("/ws", async context =>
                         }
                     }
                 }
-                // Corrigido para reconhecer "type":2 como resposta
                 else if (message.Contains("\"type\":2") || message.Contains("\"type\":\"answer\""))
                 {
-                    answers[clientId] = message;
-                    Console.WriteLine($"Resposta armazenada para {clientId}");
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open && offers.ContainsKey(client.Key))
@@ -70,7 +75,6 @@ app.Map("/ws", async context =>
         {
             clients.TryRemove(clientId, out _);
             offers.TryRemove(clientId, out _);
-            answers.TryRemove(clientId, out _);
             if (ws.State != WebSocketState.Closed && ws.State != WebSocketState.Aborted)
             {
                 await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
