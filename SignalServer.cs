@@ -6,7 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
 var clients = new ConcurrentDictionary<string, WebSocket>();
-var lastOffer = string.Empty;
+var offers = new ConcurrentDictionary<string, string>(); // Armazena ofertas por clientId
 
 app.UseWebSockets();
 app.Map("/ws", async context =>
@@ -25,24 +25,26 @@ app.Map("/ws", async context =>
                 var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
 
-                if (message.Contains("offer"))
+                if (message.Contains("\"type\":\"offer\""))
                 {
-                    lastOffer = message; // Armazena a última oferta
+                    offers[clientId] = message; // Armazena a oferta
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open)
                         {
                             await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                            Console.WriteLine($"Oferta enviada de {clientId} para {client.Key}");
                         }
                     }
                 }
-                else if (message.Contains("answer") && !string.IsNullOrEmpty(lastOffer))
+                else if (message.Contains("\"type\":\"answer\""))
                 {
                     foreach (var client in clients)
                     {
-                        if (client.Key != clientId && client.Value.State == WebSocketState.Open)
+                        if (client.Key != clientId && client.Value.State == WebSocketState.Open && offers.ContainsKey(client.Key))
                         {
                             await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                            Console.WriteLine($"Resposta enviada de {clientId} para {client.Key}");
                         }
                     }
                 }
@@ -55,7 +57,11 @@ app.Map("/ws", async context =>
         finally
         {
             clients.TryRemove(clientId, out _);
-            await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
+            offers.TryRemove(clientId, out _);
+            if (ws.State == WebSocketState.Open)
+            {
+                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
+            }
         }
     }
 });
