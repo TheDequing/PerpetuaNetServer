@@ -6,7 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
 var clients = new ConcurrentDictionary<string, WebSocket>();
-var offers = new ConcurrentDictionary<string, string>(); // Armazena ofertas por clientId
+var offers = new ConcurrentDictionary<string, string>();
 
 app.UseWebSockets();
 app.Map("/ws", async context =>
@@ -16,6 +16,7 @@ app.Map("/ws", async context =>
         var ws = await context.WebSockets.AcceptWebSocketAsync();
         var clientId = Guid.NewGuid().ToString();
         clients.TryAdd(clientId, ws);
+        Console.WriteLine($"Cliente conectado: {clientId}");
 
         try
         {
@@ -24,10 +25,11 @@ app.Map("/ws", async context =>
                 var buffer = new byte[1024];
                 var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                Console.WriteLine($"Mensagem recebida de {clientId}: {message}");
 
                 if (message.Contains("\"type\":\"offer\""))
                 {
-                    offers[clientId] = message; // Armazena a oferta
+                    offers[clientId] = message;
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open)
@@ -52,16 +54,17 @@ app.Map("/ws", async context =>
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Erro no WebSocket: {ex.Message}");
+            Console.WriteLine($"Erro no WebSocket para {clientId}: {ex.Message}");
         }
         finally
         {
             clients.TryRemove(clientId, out _);
             offers.TryRemove(clientId, out _);
-            if (ws.State == WebSocketState.Open)
+            if (ws.State == WebSocketState.Open || ws.State == WebSocketState.CloseReceived)
             {
                 await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
             }
+            Console.WriteLine($"Cliente desconectado: {clientId}");
         }
     }
 });
