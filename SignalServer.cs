@@ -28,7 +28,8 @@ app.Map("/ws", async context =>
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                 Console.WriteLine($"Mensagem recebida de {clientId}: {message}");
 
-                if (message.Contains("\"type\":\"offer\""))
+                // Corrigido para reconhecer "type":1 como oferta
+                if (message.Contains("\"type\":1") || message.Contains("\"type\":\"offer\""))
                 {
                     offers[clientId] = message;
                     Console.WriteLine($"Oferta armazenada para {clientId}");
@@ -41,7 +42,8 @@ app.Map("/ws", async context =>
                         }
                     }
                 }
-                else if (message.Contains("\"type\":\"answer\""))
+                // Corrigido para reconhecer "type":2 como resposta
+                else if (message.Contains("\"type\":2") || message.Contains("\"type\":\"answer\""))
                 {
                     answers[clientId] = message;
                     Console.WriteLine($"Resposta armazenada para {clientId}");
