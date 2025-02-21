@@ -7,6 +7,7 @@ var app = builder.Build();
 
 var clients = new ConcurrentDictionary<string, WebSocket>();
 var offers = new ConcurrentDictionary<string, string>();
+var answers = new ConcurrentDictionary<string, string>();
 
 app.UseWebSockets();
 app.Map("/ws", async context =>
@@ -41,6 +42,7 @@ app.Map("/ws", async context =>
                 }
                 else if (message.Contains("\"type\":\"answer\""))
                 {
+                    answers[clientId] = message;
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open && offers.ContainsKey(client.Key))
@@ -60,7 +62,8 @@ app.Map("/ws", async context =>
         {
             clients.TryRemove(clientId, out _);
             offers.TryRemove(clientId, out _);
-            if (ws.State == WebSocketState.Open || ws.State == WebSocketState.CloseReceived)
+            answers.TryRemove(clientId, out _);
+            if (ws.State != WebSocketState.Closed && ws.State != WebSocketState.Aborted)
             {
                 await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
             }
