@@ -45,4 +45,4 @@ app.Map("/ws", async context =>
     }
 });
 
-await app.RunAsync("http://0.0.0.0:5000"); // Porta ajustável no Render
+await app.RunAsync("http://0.0.0.0:5000");
