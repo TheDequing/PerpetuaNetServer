@@ -1,12 +1,29 @@
 ﻿using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using System.Collections.Concurrent;
+using System.Threading.Tasks;
+using Serilog;
+using System;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
+// Configuração do Serilog
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .WriteTo.Console()
+    .WriteTo.File("logs/server_logs.txt", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
+
 var clients = new ConcurrentDictionary<string, WebSocket>();
-var offers = new ConcurrentDictionary<string, string>();
+var offers = new ConcurrentDictionary<string, (string Message, DateTime Timestamp)>();
+
+public class SignalingMessage
+{
+    public int Type { get; set; } // 1 = offer, 2 = answer
+    public string? Sdp { get; set; }
+}
 
 app.UseWebSockets();
 app.Map("/ws", async context =>
@@ -16,15 +33,15 @@ app.Map("/ws", async context =>
         var ws = await context.WebSockets.AcceptWebSocketAsync();
         var clientId = Guid.NewGuid().ToString();
         clients.TryAdd(clientId, ws);
-        Console.WriteLine($"Cliente conectado: {clientId}");
+        Log.Information("Cliente conectado: {ClientId}", clientId);
 
-        // Enviar oferta existente de outro peer, se houver
+        // Enviar oferta existente de outro peer, se houver (com limite de 5 minutos)
         foreach (var offer in offers)
         {
-            if (offer.Key != clientId && ws.State == WebSocketState.Open)
+            if (offer.Key != clientId && ws.State == WebSocketState.Open && (DateTime.UtcNow - offer.Value.Timestamp).TotalMinutes < 5)
             {
-                await ws.SendAsync(Encoding.UTF8.GetBytes(offer.Value), WebSocketMessageType.Text, true, CancellationToken.None);
-                Console.WriteLine($"Oferta existente enviada de {offer.Key} para novo cliente {clientId}");
+                await ws.SendAsync(Encoding.UTF8.GetBytes(offer.Value.Message), WebSocketMessageType.Text, true, CancellationToken.None);
+                Log.Information("Oferta existente enviada de {OfferClientId} para novo cliente {ClientId}", offer.Key, clientId);
             }
         }
 
@@ -35,41 +52,48 @@ app.Map("/ws", async context =>
                 var buffer = new byte[1024];
                 var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                Console.WriteLine($"Mensagem recebida de {clientId}: {message}");
+                Log.Information("Mensagem recebida de {ClientId}: {Message}", clientId, message);
 
-                if (message.Contains("\"type\":1") || message.Contains("\"type\":\"offer\""))
+                var msg = JsonSerializer.Deserialize<SignalingMessage>(message);
+                if (msg == null || string.IsNullOrEmpty(msg.Sdp))
                 {
-                    offers[clientId] = message;
-                    Console.WriteLine($"Oferta armazenada para {clientId}");
+                    Log.Warning("Mensagem ignorada de {ClientId}: formato inválido", clientId);
+                    continue;
+                }
+
+                if (msg.Type == 1) // Oferta
+                {
+                    offers[clientId] = (message, DateTime.UtcNow);
+                    Log.Information("Oferta armazenada para {ClientId}", clientId);
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open)
                         {
                             await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
-                            Console.WriteLine($"Oferta enviada de {clientId} para {client.Key}");
+                            Log.Information("Oferta enviada de {ClientId} para {TargetClientId}", clientId, client.Key);
                         }
                     }
                 }
-                else if (message.Contains("\"type\":2") || message.Contains("\"type\":\"answer\""))
+                else if (msg.Type == 2) // Resposta
                 {
                     foreach (var client in clients)
                     {
                         if (client.Key != clientId && client.Value.State == WebSocketState.Open && offers.ContainsKey(client.Key))
                         {
                             await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
-                            Console.WriteLine($"Resposta enviada de {clientId} para {client.Key}");
+                            Log.Information("Resposta enviada de {ClientId} para {TargetClientId}", clientId, client.Key);
                         }
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"Mensagem ignorada de {clientId}: não é oferta nem resposta");
+                    Log.Warning("Mensagem ignorada de {ClientId}: tipo desconhecido {Type}", clientId, msg.Type);
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Erro no WebSocket para {clientId}: {ex.Message}");
+            Log.Error(ex, "Erro no WebSocket para {ClientId}: {Message}", clientId, ex.Message);
         }
         finally
         {
@@ -79,7 +103,7 @@ app.Map("/ws", async context =>
             {
                 await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
             }
-            Console.WriteLine($"Cliente desconectado: {clientId}");
+            Log.Information("Cliente desconectado: {ClientId}", clientId);
         }
     }
 });
