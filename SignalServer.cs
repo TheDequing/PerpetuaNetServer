@@ -1,16 +1,13 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Hosting;
 using Serilog;
+using SIPSorcery.Net;
 
-namespace SignalServer
+namespace PerpetuaNet
 {
     public class SignalingMessage
     {
@@ -18,155 +15,193 @@ namespace SignalServer
         public string? Sdp { get; set; }
     }
 
-    public class Program
+    public class WebRTCSyncService : IDisposable
     {
-        private static readonly ConcurrentDictionary<string, WebSocket> Clients = new();
-        private static readonly ConcurrentDictionary<string, (string Message, DateTime Timestamp)> Offers = new();
+        private RTCPeerConnection? _pc;
+        private ClientWebSocket? _ws;
+        private readonly string _logFile = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs.txt");
+        private bool _disposed = false;
 
-        public static async Task Main(string[] args)
+        public WebRTCSyncService()
         {
             // Configuração do Serilog
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Information()
-                .WriteTo.Console()
-                .WriteTo.File("logs/server_logs.txt", rollingInterval: RollingInterval.Day)
+                .WriteTo.File(_logFile, rollingInterval: RollingInterval.Day)
                 .CreateLogger();
-
-            var builder = WebApplication.CreateBuilder(args);
-            var app = builder.Build();
-
-            app.UseWebSockets();
-
-            // Mapeia a rota "/ws" para conexões WebSocket
-            app.Map("/ws", async (HttpContext context) =>
-            {
-                if (!context.WebSockets.IsWebSocketRequest)
-                {
-                    context.Response.StatusCode = 400;
-                    await context.Response.WriteAsync("Apenas requisições WebSocket são permitidas.");
-                    return;
-                }
-
-                // Aceita a conexão WebSocket
-                var ws = await context.WebSockets.AcceptWebSocketAsync();
-                var clientId = Guid.NewGuid().ToString();
-                Clients.TryAdd(clientId, ws);
-                Log.Information("Cliente conectado: {ClientId}", clientId);
-
-                // Envia ofertas existentes (menos de 5 minutos) para o novo cliente
-                foreach (var offer in Offers)
-                {
-                    if (offer.Key != clientId &&
-                        ws.State == WebSocketState.Open &&
-                        (DateTime.UtcNow - offer.Value.Timestamp).TotalMinutes < 5)
-                    {
-                        await ws.SendAsync(Encoding.UTF8.GetBytes(offer.Value.Message),
-                                             WebSocketMessageType.Text, true, CancellationToken.None);
-                        Log.Information("Oferta existente enviada de {OfferClientId} para novo cliente {ClientId}", offer.Key, clientId);
-                    }
-                }
-
-                try
-                {
-                    while (ws.State == WebSocketState.Open)
-                    {
-                        // Usa um método que acumula a mensagem completa
-                        string message = await ReceiveFullMessageAsync(ws, CancellationToken.None);
-                        if (string.IsNullOrWhiteSpace(message))
-                        {
-                            Log.Warning("Mensagem recebida de {ClientId} está vazia; ignorando.", clientId);
-                            continue;
-                        }
-
-                        Log.Information("Mensagem recebida de {ClientId}: {Message}", clientId, message);
-
-                        SignalingMessage? msg = null;
-                        try
-                        {
-                            msg = JsonSerializer.Deserialize<SignalingMessage>(message);
-                        }
-                        catch (JsonException jsonEx)
-                        {
-                            Log.Error(jsonEx, "Erro ao desserializar mensagem de {ClientId}: {Error}", clientId, jsonEx.Message);
-                            continue;
-                        }
-
-                        if (msg == null || string.IsNullOrWhiteSpace(msg.Sdp))
-                        {
-                            Log.Warning("Mensagem ignorada de {ClientId}: formato inválido", clientId);
-                            continue;
-                        }
-
-                        if (msg.Type == 1) // Oferta
-                        {
-                            Offers[clientId] = (message, DateTime.UtcNow);
-                            Log.Information("Oferta armazenada para {ClientId}", clientId);
-                            foreach (var client in Clients)
-                            {
-                                if (client.Key != clientId && client.Value.State == WebSocketState.Open)
-                                {
-                                    try
-                                    {
-                                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message),
-                                                                     WebSocketMessageType.Text, true, CancellationToken.None);
-                                        Log.Information("Oferta enviada de {ClientId} para {TargetClientId}", clientId, client.Key);
-                                    }
-                                    catch (WebSocketException wsEx)
-                                    {
-                                        Log.Error(wsEx, "Erro ao enviar oferta de {ClientId} para {TargetClientId}", clientId, client.Key);
-                                    }
-                                }
-                            }
-                        }
-                        else if (msg.Type == 2) // Resposta
-                        {
-                            foreach (var client in Clients)
-                            {
-                                if (client.Key != clientId && client.Value.State == WebSocketState.Open && Offers.ContainsKey(client.Key))
-                                {
-                                    try
-                                    {
-                                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message),
-                                                                     WebSocketMessageType.Text, true, CancellationToken.None);
-                                        Log.Information("Resposta enviada de {ClientId} para {TargetClientId}", clientId, client.Key);
-                                    }
-                                    catch (WebSocketException wsEx)
-                                    {
-                                        Log.Error(wsEx, "Erro ao enviar resposta de {ClientId} para {TargetClientId}", clientId, client.Key);
-                                    }
-                                }
-                            }
-                        }
-                        else
-                        {
-                            Log.Warning("Mensagem ignorada de {ClientId}: tipo desconhecido {Type}", clientId, msg.Type);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.Error(ex, "Erro no WebSocket para {ClientId}: {Error}", clientId, ex.Message);
-                }
-                finally
-                {
-                    Clients.TryRemove(clientId, out _);
-                    Offers.TryRemove(clientId, out _);
-                    if (ws.State != WebSocketState.Closed && ws.State != WebSocketState.Aborted)
-                    {
-                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Conexão fechada", CancellationToken.None);
-                    }
-                    Log.Information("Cliente desconectado: {ClientId}", clientId);
-                }
-            });
-
-            await app.RunAsync("http://0.0.0.0:5000");
         }
 
-        // Método para ler a mensagem completa do WebSocket (com buffer maior para evitar truncamento)
+        public async Task InitializeAndSync()
+        {
+            Log.Information("Aplicativo iniciado, preparando sincronização WebRTC...");
+
+            try
+            {
+                Log.Information("Iniciando sincronização WebRTC...");
+
+                // Configurar a RTCConfiguration com um servidor STUN
+                var config = new RTCConfiguration
+                {
+                    iceServers = new System.Collections.Generic.List<RTCIceServer>
+                    {
+                        new RTCIceServer { urls = "stun:stun.l.google.com:19302" }
+                    }
+                };
+
+                Log.Information("Configurando RTCPeerConnection...");
+                _pc = new RTCPeerConnection(config);
+
+                // Criação do canal de dados
+                Log.Information("Criando canal de dados 'syncChannel'...");
+                var channel = await _pc.createDataChannel("syncChannel", null);
+                channel.onopen += () =>
+                {
+                    channel.send("Sincronização iniciada!");
+                    Log.Information("Canal de dados aberto.");
+                };
+                channel.onmessage += (ch, protocol, data) =>
+                {
+                    Log.Information("Mensagem recebida no canal: {Data}", Encoding.UTF8.GetString(data));
+                };
+
+                // Inicialização do ClientWebSocket
+                Log.Information("Inicializando ClientWebSocket...");
+                _ws = new ClientWebSocket();
+                _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+                Log.Information("Conectando ao WebSocket em: wss://perpetuanetserver.onrender.com/ws");
+
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                {
+                    await _ws.ConnectAsync(new Uri("wss://perpetuanetserver.onrender.com/ws"), cts.Token);
+                }
+                Log.Information("WebRTC: Conectado ao WebSocket.");
+
+                // Configurar manipulador de candidatos ICE
+                _pc.onicecandidate += async (candidate) =>
+                {
+                    await SendIceCandidateAsync(candidate);
+                };
+
+                // Aguardar oferta remota por até 30 segundos
+                RTCSessionDescriptionInit? remoteOffer = null;
+                Log.Information("Verificando se há oferta remota...");
+                using (var offerCts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    while (_ws.State == WebSocketState.Open && remoteOffer == null && !offerCts.Token.IsCancellationRequested)
+                    {
+                        string message = await ReceiveFullMessageAsync(_ws, offerCts.Token);
+                        Log.Information("Mensagem recebida do servidor: {Message}", message);
+
+                        try
+                        {
+                            var msg = JsonSerializer.Deserialize<SignalingMessage>(message);
+                            if (msg?.Type == 1 && !string.IsNullOrWhiteSpace(msg.Sdp))
+                            {
+                                remoteOffer = new RTCSessionDescriptionInit { type = RTCSdpType.offer, sdp = msg.Sdp };
+                                Log.Information("Oferta remota recebida, configurando descrição remota...");
+                                await _pc.setRemoteDescription(new RTCSessionDescription { type = RTCSdpType.offer, sdp = msg.Sdp });
+                                Log.Information("Oferta remota configurada com sucesso.");
+                                break;
+                            }
+                            else
+                            {
+                                Log.Warning("Mensagem ignorada: não é uma oferta válida.");
+                            }
+                        }
+                        catch (JsonException jex)
+                        {
+                            Log.Error(jex, "Erro ao desserializar mensagem de oferta.");
+                        }
+                    }
+                }
+
+                if (remoteOffer == null)
+                {
+                    // Se não houver oferta remota, criar oferta local
+                    Log.Information("Nenhuma oferta remota recebida. Criando oferta local...");
+                    var offer = await _pc.createOffer(null);
+                    await _pc.setLocalDescription(offer);
+                    Log.Information("Oferta local criada e configurada.");
+
+                    var offerJson = JsonSerializer.Serialize(new SignalingMessage { Type = 1, Sdp = offer.sdp });
+                    Log.Information("Enviando oferta local ao servidor...");
+                    await _ws.SendAsync(Encoding.UTF8.GetBytes(offerJson), WebSocketMessageType.Text, true, CancellationToken.None);
+                    Log.Information("Oferta local enviada com sucesso.");
+                }
+                else
+                {
+                    // Se houver oferta, criar e enviar resposta
+                    Log.Information("Criando resposta para a oferta remota...");
+                    var answer = await _pc.createAnswer(null);
+                    await _pc.setLocalDescription(answer);
+                    Log.Information("Resposta local criada e configurada.");
+
+                    var answerJson = JsonSerializer.Serialize(new SignalingMessage { Type = 2, Sdp = answer.sdp });
+                    Log.Information("Enviando resposta ao servidor...");
+                    await _ws.SendAsync(Encoding.UTF8.GetBytes(answerJson), WebSocketMessageType.Text, true, CancellationToken.None);
+                    Log.Information("Resposta enviada com sucesso.");
+                }
+
+                // Aguardar resposta adicional por até 30 segundos
+                Log.Information("Aguardando resposta adicional ou conexão final...");
+                using (var responseCts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    while (_ws.State == WebSocketState.Open && !responseCts.Token.IsCancellationRequested)
+                    {
+                        string additional = await ReceiveFullMessageAsync(_ws, responseCts.Token);
+                        if (string.IsNullOrWhiteSpace(additional))
+                        {
+                            Log.Warning("Mensagem adicional vazia recebida; ignorando.");
+                            continue;
+                        }
+
+                        try
+                        {
+                            var msg = JsonSerializer.Deserialize<SignalingMessage>(additional);
+                            if (msg?.Type == 2 && !string.IsNullOrWhiteSpace(msg.Sdp))
+                            {
+                                Log.Information("Configurando descrição remota com a resposta...");
+                                await _pc.setRemoteDescription(new RTCSessionDescription { type = RTCSdpType.answer, sdp = msg.Sdp });
+                                Log.Information("Resposta remota configurada com sucesso.");
+                                break;
+                            }
+                            else
+                            {
+                                Log.Warning("Mensagem adicional ignorada: não é uma resposta válida.");
+                            }
+                        }
+                        catch (JsonException jex)
+                        {
+                            Log.Error(jex, "Erro ao desserializar mensagem adicional.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Erro na inicialização do WebRTC: {Message}", ex.Message);
+            }
+        }
+
+        private async Task SendIceCandidateAsync(RTCIceCandidate candidate)
+        {
+            if (_ws != null && _ws.State == WebSocketState.Open)
+            {
+                var json = JsonSerializer.Serialize(candidate);
+                await _ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None);
+                Log.Information("Candidato ICE enviado: {Candidate}", json);
+            }
+            else
+            {
+                Log.Warning("WebSocket não está aberto para enviar candidato ICE.");
+            }
+        }
+
+        // Método para receber a mensagem completa do WebSocket com buffer ampliado
         private static async Task<string> ReceiveFullMessageAsync(WebSocket ws, CancellationToken cancellationToken)
         {
-            // Aumentamos o tamanho do buffer para 8192 bytes
-            var buffer = new byte[8192];
+            // Aumentamos o buffer para 16KB (16384 bytes)
+            var buffer = new byte[16384];
             using var ms = new System.IO.MemoryStream();
             WebSocketReceiveResult result;
             do
@@ -176,6 +211,31 @@ namespace SignalServer
             } while (!result.EndOfMessage);
 
             return Encoding.UTF8.GetString(ms.ToArray());
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            try
+            {
+                if (_ws != null && (_ws.State == WebSocketState.Open || _ws.State == WebSocketState.CloseReceived))
+                {
+                    _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Fechando conexão", CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                }
+                _ws?.Dispose();
+                if (_pc != null)
+                {
+                    _pc.Close("Serviço finalizado");
+                    _pc.Dispose();
+                }
+                Log.CloseAndFlush();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Erro ao liberar recursos: {Message}", ex.Message);
+            }
+            _disposed = true;
         }
     }
 }
