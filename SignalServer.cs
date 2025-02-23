@@ -1,12 +1,12 @@
 ﻿using System;
 using System.Collections.Concurrent;
-using System.IO;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 
@@ -37,11 +37,13 @@ namespace SignalServer
 
             app.UseWebSockets();
 
-            app.Map("/ws", async context =>
+            // Mapeia a rota "/ws" para conexões WebSocket
+            app.Map("/ws", async (HttpContext context) =>
             {
                 if (!context.WebSockets.IsWebSocketRequest)
                 {
                     context.Response.StatusCode = 400;
+                    await context.Response.WriteAsync("WebSocket requests only.");
                     return;
                 }
 
@@ -50,7 +52,7 @@ namespace SignalServer
                 Clients.TryAdd(clientId, ws);
                 Log.Information("Cliente conectado: {ClientId}", clientId);
 
-                // Enviar ofertas existentes (menos de 5 minutos) para o novo cliente
+                // Enviar ofertas existentes (com menos de 5 minutos) para o novo cliente
                 foreach (var offer in Offers)
                 {
                     if (offer.Key != clientId && ws.State == WebSocketState.Open &&
@@ -83,8 +85,7 @@ namespace SignalServer
                         }
                         catch (JsonException jsonEx)
                         {
-                            Log.Error(jsonEx, "Erro na desserialização da mensagem de {ClientId}: {Message}",
-                                      clientId, jsonEx.Message);
+                            Log.Error(jsonEx, "Erro na desserialização da mensagem de {ClientId}: {Error}", clientId, jsonEx.Message);
                             continue;
                         }
 
@@ -142,7 +143,7 @@ namespace SignalServer
                 }
                 catch (Exception ex)
                 {
-                    Log.Error(ex, "Erro no WebSocket para {ClientId}: {Message}", clientId, ex.Message);
+                    Log.Error(ex, "Erro no WebSocket para {ClientId}: {Error}", clientId, ex.Message);
                 }
                 finally
                 {
@@ -159,8 +160,8 @@ namespace SignalServer
             await app.RunAsync("http://0.0.0.0:5000");
         }
 
-        // Método auxiliar para ler uma mensagem completa do WebSocket
-        private static async Task<string> ReceiveFullMessageAsync(ClientWebSocket ws, CancellationToken cancellationToken)
+        // Método para ler a mensagem completa do WebSocket (acumula os dados até o fim da mensagem)
+        private static async Task<string> ReceiveFullMessageAsync(WebSocket ws, CancellationToken cancellationToken)
         {
             var buffer = new byte[1024];
             using var ms = new MemoryStream();
