@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -49,14 +50,16 @@ namespace SignalServer
                 Clients.TryAdd(clientId, ws);
                 Log.Information("Cliente conectado: {ClientId}", clientId);
 
-                // Enviar ofertas existentes (com menos de 5 minutos) para o novo cliente
+                // Enviar ofertas existentes (menos de 5 minutos) para o novo cliente
                 foreach (var offer in Offers)
                 {
                     if (offer.Key != clientId && ws.State == WebSocketState.Open &&
                         (DateTime.UtcNow - offer.Value.Timestamp).TotalMinutes < 5)
                     {
-                        await ws.SendAsync(Encoding.UTF8.GetBytes(offer.Value.Message), WebSocketMessageType.Text, true, CancellationToken.None);
-                        Log.Information("Oferta existente enviada de {OfferClientId} para novo cliente {ClientId}", offer.Key, clientId);
+                        await ws.SendAsync(Encoding.UTF8.GetBytes(offer.Value.Message),
+                                             WebSocketMessageType.Text, true, CancellationToken.None);
+                        Log.Information("Oferta existente enviada de {OfferClientId} para novo cliente {ClientId}",
+                                        offer.Key, clientId);
                     }
                 }
 
@@ -64,20 +67,15 @@ namespace SignalServer
                 {
                     while (ws.State == WebSocketState.Open)
                     {
-                        var buffer = new byte[4096];
-                        var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-
-                        // Verifica se o resultado contém dados
-                        if (result.Count == 0)
+                        string message = await ReceiveFullMessageAsync(ws, CancellationToken.None);
+                        if (string.IsNullOrWhiteSpace(message))
                         {
                             Log.Warning("Mensagem recebida de {ClientId} está vazia; ignorando.", clientId);
                             continue;
                         }
 
-                        var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                         Log.Information("Mensagem recebida de {ClientId}: {Message}", clientId, message);
 
-                        // Tenta desserializar a mensagem; se falhar, registra e ignora
                         SignalingMessage? msg = null;
                         try
                         {
@@ -85,7 +83,8 @@ namespace SignalServer
                         }
                         catch (JsonException jsonEx)
                         {
-                            Log.Error(jsonEx, "Erro na desserialização da mensagem de {ClientId}: {Message}", clientId, jsonEx.Message);
+                            Log.Error(jsonEx, "Erro na desserialização da mensagem de {ClientId}: {Message}",
+                                      clientId, jsonEx.Message);
                             continue;
                         }
 
@@ -105,7 +104,8 @@ namespace SignalServer
                                 {
                                     try
                                     {
-                                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message),
+                                                                     WebSocketMessageType.Text, true, CancellationToken.None);
                                         Log.Information("Oferta enviada de {ClientId} para {TargetClientId}", clientId, client.Key);
                                     }
                                     catch (WebSocketException wsEx)
@@ -123,7 +123,8 @@ namespace SignalServer
                                 {
                                     try
                                     {
-                                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                                        await client.Value.SendAsync(Encoding.UTF8.GetBytes(message),
+                                                                     WebSocketMessageType.Text, true, CancellationToken.None);
                                         Log.Information("Resposta enviada de {ClientId} para {TargetClientId}", clientId, client.Key);
                                     }
                                     catch (WebSocketException wsEx)
@@ -156,6 +157,21 @@ namespace SignalServer
             });
 
             await app.RunAsync("http://0.0.0.0:5000");
+        }
+
+        // Método auxiliar para ler uma mensagem completa do WebSocket
+        private static async Task<string> ReceiveFullMessageAsync(ClientWebSocket ws, CancellationToken cancellationToken)
+        {
+            var buffer = new byte[1024];
+            using var ms = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                ms.Write(buffer, 0, result.Count);
+            } while (!result.EndOfMessage);
+
+            return Encoding.UTF8.GetString(ms.ToArray());
         }
     }
 }
